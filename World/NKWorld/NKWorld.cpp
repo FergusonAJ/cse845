@@ -160,8 +160,66 @@ double EditDistance_DL(const std::vector<size_t>& vec_a, const std::vector<size_
     return matrix.Get(vec_a.size() + 1, vec_b.size() + 1);
 }
 
+struct WilcoxPair{
+  double score;
+  bool is_mutant;
+  double rank;
+};
+// Wilcoxon rank-sum
+// Implemented from method 2 of: https://en.wikipedia.org/wiki/Mann%E2%80%93Whitney_U_test
+double Wilcoxon_U(std::vector<RankEpistasisData>& vec){
+  // Create ONE vector to store the necessary data (score + is it a mutant?)
+  static std::vector<WilcoxPair> rank_vec(vec.size() * 2);
+  // Fill new vector with mutant + non-mutant scores
+  for(size_t idx = 0; idx < vec.size(); ++idx){
+    rank_vec[idx].score = vec[idx].score_original;
+    rank_vec[idx].is_mutant = false;
+    rank_vec[idx + vec.size()].score = vec[idx].score_mutant;
+    rank_vec[idx + vec.size()].is_mutant = true;
+  }
+  // Sort the new vector by score (intermix mutants and non-mutants)
+  std::stable_sort(rank_vec.begin(), rank_vec.end(),
+              [](const WilcoxPair& a, const WilcoxPair& b){
+             return a.score < b.score;
+          });
+  size_t rank = 0;
+  size_t rank_idx = 0;
+  size_t offset = 0;
+  // Repeated scores should have the same rank
+  // This rank is the midpoint of the ranks if they were sequential
+  // e.g. (from Wikipedia) scores = 3,5,5,5,5,8 => ranks 1,3.5,3.5,3.5,3.5,6
+  while(rank_idx < rank_vec.size()){
+    offset = 1;
+    while(true){
+      // If the next number is not the same, stop! (also stop if we run off the end)
+      if(rank_idx + offset > rank_vec.size() || 
+          rank_vec[rank_idx + offset].score != rank_vec[rank_idx].score){
+        break;
+      }
+      ++offset;
+    }
+    // Find the midpoint, and put it in each slot with the same score
+    for(size_t tmp_offset = 0; tmp_offset < offset; ++tmp_offset){
+      // Equivalent to ((rank + 1) + (rank + offset)) / 2
+      rank_vec[rank_idx + tmp_offset].rank = (2.0 * rank + offset + 1) / 2 ;
+    }
+    rank_idx += offset;
+    rank += offset;
+  }
+  // Sum ranks of non-mutants
+  double rank_sum_1 = 0; 
+  for(size_t idx = 0; idx < rank_vec.size(); ++idx){
+    if(!rank_vec[idx].is_mutant){
+      rank_sum_1 += rank_vec[idx].rank;
+    }
+  }
+  // Cacluate and return U_1 value
+  return rank_sum_1 - (vec.size() * (vec.size() + 1)) / 2;
+}
+
+
 // General edit distance function that will direct you to the specified metric
-double EditDistance(const std::vector<size_t>& vec_a, const std::vector<size_t>& vec_b, 
+double EitDistance(const std::vector<size_t>& vec_a, const std::vector<size_t>& vec_b, 
         EditDistanceMetric metric){
     switch(metric){
         case kLevenshtein:
@@ -415,33 +473,63 @@ void NKWorld::recordRankEpistasis(std::map<std::string, std::shared_ptr<Group>> 
           }
           for(size_t focal_locus_idx = 0; focal_locus_idx < N; ++focal_locus_idx){
             for(size_t mut_locus_idx = 0; mut_locus_idx < N; ++mut_locus_idx){
-              brain_data[mut_locus_idx] ^= 1;
-              mutant_data_vec[mut_locus_idx].score_original = evaluateData(brain_data);
-              brain_data[focal_locus_idx] ^= 1;
-              mutant_data_vec[mut_locus_idx].score_mutant = evaluateData(brain_data);
-              brain_data[mut_locus_idx] ^= 1;
-              brain_data[focal_locus_idx] ^= 1;
+              mutant_data_vec[mut_locus_idx].offset = (mut_locus_idx - focal_locus_idx + N) % N; 
+              if(mut_locus_idx == focal_locus_idx){
+                mutant_data_vec[mut_locus_idx].score_original = 0;
+                mutant_data_vec[mut_locus_idx].score_mutant = 0;
+              }
+              else{
+                brain_data[mut_locus_idx] ^= 1;
+                mutant_data_vec[mut_locus_idx].score_original = evaluateData(brain_data);
+                //std::cout << "focal=" << focal_locus_idx << ", mut=" << mut_locus_idx 
+                //  << ", orig(" << mutant_data_vec[mut_locus_idx].score_original << ")" << std::endl;
+                //for(size_t n = 0; n < N; ++n){
+                //  std::cout << (int)brain_data[n];
+                //}
+                //std::cout << std::endl;
+                brain_data[focal_locus_idx] ^= 1;
+                mutant_data_vec[mut_locus_idx].score_mutant = evaluateData(brain_data);
+                //std::cout << "focal=" << focal_locus_idx << ", mut=" << mut_locus_idx 
+                //  << ", mut(" << mutant_data_vec[mut_locus_idx].score_mutant << ")" << std::endl;
+                //for(size_t n = 0; n < N; ++n){
+                //  std::cout << (int)brain_data[n];
+                //}
+                //std::cout << std::endl << std::endl;
+                brain_data[mut_locus_idx] ^= 1;
+                brain_data[focal_locus_idx] ^= 1;
+                //std::cout << 
+                //  focal_locus_idx << "," <<
+                //  mut_locus_idx << "," <<
+                //  mutant_data_vec[mut_locus_idx].score_original << "," << 
+                //  mutant_data_vec[mut_locus_idx].score_mutant << std::endl;
+              }
             }
-          // Sort based on original (focal locus not mutated) order
-          std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
-              [](const RankEpistasisData& a, const RankEpistasisData& b){
-             return a.score_original < b.score_original; 
-          });
-          // Assign ranks [0,N)
-          for(size_t rank_id = 0; rank_id < N; ++rank_id)
-            mutant_data_vec[rank_id].rank = rank_id;
-          // Sort orgs again, this time based on the mutated (focal locus mutated) score 
-          std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
-              [](const RankEpistasisData& a, const RankEpistasisData& b){
-             return a.score_mutant < b.score_mutant; 
-          });
-          // Grab all the ranks in a vector
-          for (int i = 0; i < N; i++) {
-              rank_vec_mutated[i] = mutant_data_vec[i].rank;
-          }
-          // Calculate edit distance and add line to output
-          double edit_distance = EditDistance(rank_vec_original, rank_vec_mutated, 
-                                      (EditDistanceMetric)edit_distance_metric);
+          // Sort based on offset
+          //std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
+          //    [](const RankEpistasisData& a, const RankEpistasisData& b){
+          //   return a.offset < b.offset; 
+          //});
+          //// Sort based on original (focal locus not mutated) order
+          //std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
+          //    [](const RankEpistasisData& a, const RankEpistasisData& b){
+          //   return a.score_original < b.score_original; 
+          //});
+          //// Assign ranks [0,N)
+          //for(size_t rank_id = 0; rank_id < N; ++rank_id)
+          //  mutant_data_vec[rank_id].rank = rank_id;
+          //// Sort orgs again, this time based on the mutated (focal locus mutated) score 
+          //std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
+          //    [](const RankEpistasisData& a, const RankEpistasisData& b){
+          //   return a.score_mutant < b.score_mutant; 
+          //});
+          //// Grab all the ranks in a vector
+          //for (int i = 0; i < N; i++) {
+          //    rank_vec_mutated[i] = mutant_data_vec[i].rank;
+          //}
+          //// Calculate edit distance and add line to output
+          double edit_distance = Wilcoxon_U(mutant_data_vec); 
+          //double edit_distance = EditDistance(rank_vec_original, rank_vec_mutated, 
+          //                            (EditDistanceMetric)edit_distance_metric);
           output_string_stream << Global::update 
                                << ","
                                << org_idx
