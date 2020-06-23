@@ -161,39 +161,56 @@ double EditDistance_DL(const std::vector<size_t>& vec_a, const std::vector<size_
 }
 
 struct WilcoxPair{
-  double score;
-  bool is_mutant;
+  double abs_diff;
+  int sign;
   double rank;
 };
-// Wilcoxon rank-sum
-// Implemented from method 2 of: https://en.wikipedia.org/wiki/Mann%E2%80%93Whitney_U_test
-double Wilcoxon_U(std::vector<RankEpistasisData>& vec){
-  // Create ONE vector to store the necessary data (score + is it a mutant?)
-  static std::vector<WilcoxPair> rank_vec(vec.size() * 2);
-  // Fill new vector with mutant + non-mutant scores
-  for(size_t idx = 0; idx < vec.size(); ++idx){
-    rank_vec[idx].score = vec[idx].score_original;
-    rank_vec[idx].is_mutant = false;
-    rank_vec[idx + vec.size()].score = vec[idx].score_mutant;
-    rank_vec[idx + vec.size()].is_mutant = true;
+struct WilcoxResult{
+  double W;
+  size_t N_r;
+};
+// Wilcoxon signed rank-sum
+// Implemented from: https://en.wikipedia.org/wiki/Wilcoxon_signed-rank_test
+WilcoxResult Wilcoxon_W(const std::vector<size_t>& vec_orig, const std::vector<size_t>& vec_mut){
+  size_t num_zeros = 0; // We ignore all pairs with difference 0
+  // Fill new vector with the paired differences
+  static std::vector<WilcoxPair> rank_vec(vec_orig.size());
+  for(size_t idx = 0; idx < rank_vec.size(); ++idx){
+    rank_vec[idx].abs_diff = vec_orig[idx] - vec_mut[idx];
+    if(rank_vec[idx].abs_diff < 0){
+      rank_vec[idx].abs_diff = -1 * rank_vec[idx].abs_diff;
+      rank_vec[idx].sign = -1;
+    }
+    else if(rank_vec[idx].abs_diff == 0){
+      rank_vec[idx].sign = 0;
+      ++num_zeros;
+    }
+    else{
+      rank_vec[idx].sign = 1;
+    }
   }
-  // Sort the new vector by score (intermix mutants and non-mutants)
+  // Sort the new vector by the absolute difference
   std::stable_sort(rank_vec.begin(), rank_vec.end(),
               [](const WilcoxPair& a, const WilcoxPair& b){
-             return a.score < b.score;
+             return a.abs_diff < b.abs_diff;
           });
-  size_t rank = 0;
-  size_t rank_idx = 0;
-  size_t offset = 0;
+  size_t rank = 0;     // Current rank to be assigned
+  size_t rank_idx = 0; // Current index to assign a rank to
+  size_t offset = 0;   // How many scores (this + following) have the same score?
   // Repeated scores should have the same rank
   // This rank is the midpoint of the ranks if they were sequential
   // e.g. (from Wikipedia) scores = 3,5,5,5,5,8 => ranks 1,3.5,3.5,3.5,3.5,6
   while(rank_idx < rank_vec.size()){
     offset = 1;
     while(true){
+      if(rank_vec[rank_idx].abs_diff == 0){ // Ignore zeros
+        rank_vec[rank_idx].rank = 0;
+        ++rank_idx;
+        continue;
+      }
       // If the next number is not the same, stop! (also stop if we run off the end)
       if(rank_idx + offset > rank_vec.size() || 
-          rank_vec[rank_idx + offset].score != rank_vec[rank_idx].score){
+          rank_vec[rank_idx + offset].abs_diff != rank_vec[rank_idx].abs_diff){
         break;
       }
       ++offset;
@@ -206,15 +223,13 @@ double Wilcoxon_U(std::vector<RankEpistasisData>& vec){
     rank_idx += offset;
     rank += offset;
   }
-  // Sum ranks of non-mutants
-  double rank_sum_1 = 0; 
+  // Sum rank x sign for each pair 
+  double sum = 0; 
   for(size_t idx = 0; idx < rank_vec.size(); ++idx){
-    if(!rank_vec[idx].is_mutant){
-      rank_sum_1 += rank_vec[idx].rank;
-    }
+      sum += rank_vec[idx].rank * rank_vec[idx].sign;
   }
-  // Cacluate and return U_1 value
-  return rank_sum_1 - (vec.size() * (vec.size() + 1)) / 2;
+  // Return W value
+  return WilcoxResult{sum, rank_vec.size() - num_zeros};
 }
 
 
@@ -462,6 +477,9 @@ void NKWorld::recordRankEpistasis(std::map<std::string, std::shared_ptr<Group>> 
         std::unordered_map<std::string, double> genotype_fitness_map;
         // Create a vector to be used for easier organism evaluation 
         std::vector<uint8_t> brain_data(N, 0);
+        std::cout << std::endl << std::endl;
+        std::cout << "update,org_idx,focal_locus_idx,mut_locus_idx,fitness_one_mut,fitness_two_mut" 
+          << std::endl;
         // Calculate the edit distance metric on *each* organism in the population
         for(size_t org_idx = 0; org_idx < popSize; org_idx++) {
           auto org = groups[groupNamePL->get(PT)]->population[org_idx]->makeCopy(); 
@@ -502,46 +520,57 @@ void NKWorld::recordRankEpistasis(std::map<std::string, std::shared_ptr<Group>> 
                 //  mut_locus_idx << "," <<
                 //  mutant_data_vec[mut_locus_idx].score_original << "," << 
                 //  mutant_data_vec[mut_locus_idx].score_mutant << std::endl;
+                //std::cout << 
+                //  Global::update << "," <<
+                //  org_idx << "," <<
+                //  focal_locus_idx << "," <<
+                //  mut_locus_idx << "," <<
+                //  mutant_data_vec[mut_locus_idx].score_original << "," <<
+                //  mutant_data_vec[mut_locus_idx].score_mutant << std::endl;
               }
             }
           // Sort based on offset
-          //std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
-          //    [](const RankEpistasisData& a, const RankEpistasisData& b){
-          //   return a.offset < b.offset; 
-          //});
-          //// Sort based on original (focal locus not mutated) order
-          //std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
-          //    [](const RankEpistasisData& a, const RankEpistasisData& b){
-          //   return a.score_original < b.score_original; 
-          //});
-          //// Assign ranks [0,N)
-          //for(size_t rank_id = 0; rank_id < N; ++rank_id)
-          //  mutant_data_vec[rank_id].rank = rank_id;
-          //// Sort orgs again, this time based on the mutated (focal locus mutated) score 
-          //std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
-          //    [](const RankEpistasisData& a, const RankEpistasisData& b){
-          //   return a.score_mutant < b.score_mutant; 
-          //});
-          //// Grab all the ranks in a vector
-          //for (int i = 0; i < N; i++) {
-          //    rank_vec_mutated[i] = mutant_data_vec[i].rank;
-          //}
+          std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
+              [](const RankEpistasisData& a, const RankEpistasisData& b){
+             return a.offset < b.offset; 
+          });
+          // Sort based on original (focal locus not mutated) order
+          std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
+              [](const RankEpistasisData& a, const RankEpistasisData& b){
+             return a.score_original < b.score_original; 
+          });
+          // Assign ranks [0,N)
+          for(size_t rank_id = 0; rank_id < N; ++rank_id)
+            mutant_data_vec[rank_id].rank = rank_id;
+          // Sort orgs again, this time based on the mutated (focal locus mutated) score 
+          std::stable_sort(mutant_data_vec.begin(), mutant_data_vec.end(), 
+              [](const RankEpistasisData& a, const RankEpistasisData& b){
+             return a.score_mutant < b.score_mutant; 
+          });
+          // Grab all the ranks in a vector
+          for (int i = 0; i < N; i++) {
+              rank_vec_mutated[i] = mutant_data_vec[i].rank;
+          }
+          
           //// Calculate edit distance and add line to output
-          double edit_distance = Wilcoxon_U(mutant_data_vec); 
+          //double edit_distance = Wilcoxon_U(mutant_data_vec); 
+          WilcoxResult wilcox_res = Wilcoxon_W(rank_vec_original, rank_vec_mutated); 
           //double edit_distance = EditDistance(rank_vec_original, rank_vec_mutated, 
-          //                            (EditDistanceMetric)edit_distance_metric);
+          
           output_string_stream << Global::update 
                                << ","
                                << org_idx
                                << ","
                                << focal_locus_idx
                                << ","
-                               << edit_distance
+                               << wilcox_res.W
+                               << ","
+                               << wilcox_res.N_r
                                << std::endl;
           }
         }
         FileManager::writeToFile(output_rank_epistasis_filename, output_string_stream.str(), 
-            "update,org_idx,locus_idx,edit_distance");
+            "update,org_idx,locus_idx,W,N_r");
     }
 
 void NKWorld::recordMutantFitness(std::map<std::string, std::shared_ptr<Group>> &groups){
