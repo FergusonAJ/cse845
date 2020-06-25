@@ -21,7 +21,7 @@
 
 struct RankEpistasisData{
     size_t offset;
-    size_t rank;
+    double rank;
     double score_original;
     double score_mutant;
 };
